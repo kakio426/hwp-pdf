@@ -1,32 +1,203 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // UI Elements
+﻿document.addEventListener('DOMContentLoaded', () => {
     const dropZone = document.getElementById('drop-zone');
-    const fileInput = document.getElementById('file-input');
+    const browseLink = document.getElementById('browse-link');
     const jobList = document.getElementById('job-list');
     const template = document.getElementById('job-template');
-    const browseLink = document.querySelector('.browse-link');
+    const mainContent = document.getElementById('main-content');
+    const termsModal = document.getElementById('terms-modal');
+    const hwpNotInstalled = document.getElementById('hwp-not-installed');
+    const termsAcceptBtn = document.getElementById('terms-accept-btn');
+    const termsDeclineBtn = document.getElementById('terms-decline-btn');
 
-    // Logic Components
     const jobManager = new JobManager();
-    const POLL_INTERVAL = 1500;
-    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
-    // --- Template Helpers ---
+    const STATUS_LABELS = {
+        pending: '?湲곗쨷',
+        processing: '蹂?섏쨷',
+        completed: '?꾨즺',
+        failed: '?ㅽ뙣'
+    };
+
+    function waitForApi() {
+        return new Promise((resolve) => {
+            if (window.pywebview && window.pywebview.api) {
+                resolve();
+                return;
+            }
+            window.addEventListener('pywebviewready', resolve, { once: true });
+        });
+    }
+
+    async function initApp() {
+        await waitForApi();
+        const api = window.pywebview.api;
+
+        const accepted = await api.get_terms_accepted();
+        if (!accepted) {
+            showTermsModal();
+            return;
+        }
+
+        const installed = await api.check_hwp_installed();
+        if (!installed) {
+            showHwpNotInstalled();
+            return;
+        }
+
+        showMainContent();
+    }
+
+    function showTermsModal() {
+        termsModal.classList.remove('hidden');
+        mainContent.classList.add('hidden');
+        hwpNotInstalled.classList.add('hidden');
+    }
+
+    function showHwpNotInstalled() {
+        termsModal.classList.add('hidden');
+        mainContent.classList.add('hidden');
+        hwpNotInstalled.classList.remove('hidden');
+    }
+
+    function showMainContent() {
+        termsModal.classList.add('hidden');
+        hwpNotInstalled.classList.add('hidden');
+        mainContent.classList.remove('hidden');
+    }
+
+    termsAcceptBtn.addEventListener('click', async () => {
+        await window.pywebview.api.accept_terms();
+
+        const installed = await window.pywebview.api.check_hwp_installed();
+        if (!installed) {
+            showHwpNotInstalled();
+            return;
+        }
+        showMainContent();
+    });
+
+    termsDeclineBtn.addEventListener('click', () => {
+        window.close();
+    });
+
+    browseLink.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const files = await window.pywebview.api.select_files();
+        if (files && files.length > 0) {
+            processFiles(files);
+        }
+    });
+
+    dropZone.addEventListener('click', async () => {
+        const files = await window.pywebview.api.select_files();
+        if (files && files.length > 0) {
+            processFiles(files);
+        }
+    });
+
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+        dropZone.addEventListener(evt, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    });
+
+    ['dragenter', 'dragover'].forEach(evt => {
+        dropZone.addEventListener(evt, () => dropZone.classList.add('drag-over'));
+    });
+
+    ['dragleave', 'drop'].forEach(evt => {
+        dropZone.addEventListener(evt, () => dropZone.classList.remove('drag-over'));
+    });
+
+    dropZone.addEventListener('drop', async (e) => {
+        const droppedPaths = [];
+
+        if (e.dataTransfer && e.dataTransfer.files) {
+            for (const f of Array.from(e.dataTransfer.files)) {
+                if (f && f.path) {
+                    droppedPaths.push(f.path);
+                }
+            }
+        }
+
+        if (droppedPaths.length > 0) {
+            processFiles(droppedPaths);
+            return;
+        }
+
+        const files = await window.pywebview.api.select_files();
+        if (files && files.length > 0) {
+            processFiles(files);
+        }
+    });
+
+    function processFiles(filePaths) {
+        filePaths.forEach(filePath => processFile(filePath));
+    }
+
+    async function processFile(filePath) {
+        const filename = filePath.split('\\').pop().split('/').pop();
+        const ext = filename.split('.').pop().toLowerCase();
+
+        if (!['hwp', 'hwpx'].includes(ext)) {
+            alert(`"${filename}" ?뚯씪? 吏?먰븯吏 ?딅뒗 ?뺤떇?낅땲??\nHWP, HWPX ?뚯씪留?蹂?섑븷 ???덉뒿?덈떎.`);
+            return;
+        }
+
+        const job = jobManager.addJob(filename);
+        const jobEl = createJobElement(job);
+        jobList.appendChild(jobEl);
+        jobList.classList.remove('hidden');
+
+        jobManager.updateJobStatus(job.id, 'processing', 30);
+        updateJobElement(jobManager.getJob(job.id));
+
+        try {
+            const result = await window.pywebview.api.convert_file(filePath);
+
+            if (result.success) {
+                job.pdf_path = result.pdf_path;
+                job.pdf_filename = result.filename;
+                jobManager.updateJobStatus(job.id, 'completed', 100);
+            } else {
+                job.error = result.error;
+                jobManager.updateJobStatus(job.id, 'failed', 0);
+            }
+        } catch (error) {
+            job.error = error.message || '蹂??以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.';
+            jobManager.updateJobStatus(job.id, 'failed', 0);
+        }
+
+        updateJobElement(jobManager.getJob(job.id));
+    }
+
     function createJobElement(job) {
         const clone = template.content.cloneNode(true);
         const el = clone.querySelector('.job-item');
         el.dataset.id = job.id;
 
-        // Initial state
         el.querySelector('.filename').textContent = job.filename;
-        el.querySelector('.status-badge').textContent = 'Pending';
+        el.querySelector('.status-badge').textContent = STATUS_LABELS.pending;
         el.querySelector('.spinner').classList.remove('hidden');
 
-        // Add Download Event
         const downloadBtn = el.querySelector('.download-btn');
-        downloadBtn.addEventListener('click', () => {
-            if (job.job_id) {
-                window.location.href = `/api/download/${job.job_id}`;
+        downloadBtn.addEventListener('click', async () => {
+            if (job.pdf_path) {
+                try {
+                    const result = await window.pywebview.api.save_file(
+                        job.pdf_path,
+                        job.pdf_filename || job.filename.replace(/\.\w+$/, '.pdf')
+                    );
+                    if (result.success) {
+                        console.log('????꾨즺:', result.path);
+                    } else if (result.error !== 'cancelled') {
+                        alert('????ㅽ뙣: ' + result.error);
+                    }
+                } catch (err) {
+                    console.error('????ㅻ쪟:', err);
+                    alert('?뚯씪 ???以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.');
+                }
             }
         });
 
@@ -43,14 +214,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const downloadBtn = el.querySelector('.download-btn');
         const errorIcon = el.querySelector('.error-icon');
 
-        // Update Badge Color & Text
-        badge.textContent = job.status.charAt(0).toUpperCase() + job.status.slice(1);
+        badge.textContent = STATUS_LABELS[job.status] || job.status;
         badge.className = 'status-badge ' + job.status;
 
-        // Update Progress
         progressBar.style.width = `${Math.min(job.progress, 100)}%`;
 
-        // Update Actions
         if (job.status === 'completed') {
             spinner.classList.add('hidden');
             downloadBtn.classList.remove('hidden');
@@ -59,131 +227,13 @@ document.addEventListener('DOMContentLoaded', () => {
             spinner.classList.add('hidden');
             downloadBtn.classList.add('hidden');
             errorIcon.classList.remove('hidden');
-            errorIcon.title = job.error || 'Conversion failed';
+            errorIcon.title = job.error || '蹂???ㅽ뙣';
         } else {
-            // Pending or Processing
             spinner.classList.remove('hidden');
             downloadBtn.classList.add('hidden');
             errorIcon.classList.add('hidden');
         }
     }
 
-    // --- Core Logic ---
-
-    // Drag & Drop
-    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
-        dropZone.addEventListener(evt, (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-        });
-    });
-
-    ['dragenter', 'dragover'].forEach(evt => {
-        dropZone.addEventListener(evt, () => dropZone.classList.add('drag-over'));
-    });
-
-    ['dragleave', 'drop'].forEach(evt => {
-        dropZone.addEventListener(evt, () => dropZone.classList.remove('drag-over'));
-    });
-
-    dropZone.addEventListener('drop', handleDrop);
-    dropZone.addEventListener('click', () => fileInput.click()); // Click to browse
-
-    if (browseLink) {
-        browseLink.addEventListener('click', (e) => {
-            e.stopPropagation();
-            fileInput.click();
-        });
-    }
-
-    fileInput.addEventListener('change', handleFiles);
-
-    function handleDrop(e) {
-        handleFiles({ target: { files: e.dataTransfer.files } });
-    }
-
-    function handleFiles(e) {
-        const files = Array.from(e.target.files);
-        if (!files.length) return;
-
-        files.forEach(processFile);
-
-        // Reset input for same file selection
-        fileInput.value = '';
-    }
-
-    async function processFile(file) {
-        // Validation
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (!['hwp', 'hwpx', 'odt', 'docx'].includes(ext)) {
-            // Using toast or alert for now, ideally strictly typed
-            alert(`Skipped ${file.name}: Unsupported file type.`);
-            return;
-        }
-
-        if (file.size > MAX_FILE_SIZE) {
-            alert(`Skipped ${file.name}: File too large.`);
-            return;
-        }
-
-        // Add to Manager & UI
-        const job = jobManager.addJob(file.name);
-        const jobEl = createJobElement(job);
-        jobList.appendChild(jobEl);
-        jobList.classList.remove('hidden');
-
-        // Start Upload
-        try {
-            jobManager.updateJobStatus(job.id, 'uploading', 10);
-            updateJobElement(jobManager.getJob(job.id));
-
-            const data = await API.uploadFile(file);
-
-            // Server accepted
-            jobManager.updateJobStatus(job.id, 'processing', 30, data.job_id);
-            updateJobElement(jobManager.getJob(job.id));
-
-            // Start Polling
-            pollStatus(job.id, data.job_id);
-
-        } catch (error) {
-            console.error(error);
-            jobManager.updateJobStatus(job.id, 'failed', 0);
-            const failedJob = jobManager.getJob(job.id);
-            failedJob.error = error.message;
-            updateJobElement(failedJob);
-        }
-    }
-
-    async function pollStatus(localId, serverJobId) {
-        try {
-            const data = await API.checkStatus(serverJobId);
-            const job = jobManager.getJob(localId);
-            if (!job) return; // Removed?
-
-            if (data.status === 'completed') {
-                jobManager.updateJobStatus(localId, 'completed', 100);
-                updateJobElement(job);
-            } else if (data.status === 'failed') {
-                job.error = data.error || 'Failed on server';
-                jobManager.updateJobStatus(localId, 'failed', 0);
-                updateJobElement(job);
-            } else {
-                // Fake progress update for UX
-                let newProgress = job.progress;
-                if (newProgress < 90) {
-                    newProgress += (Math.random() * 5);
-                }
-                jobManager.updateJobStatus(localId, 'processing', newProgress);
-                updateJobElement(job);
-
-                setTimeout(() => pollStatus(localId, serverJobId), POLL_INTERVAL);
-            }
-        } catch (error) {
-            const job = jobManager.getJob(localId);
-            job.error = 'Network error during polling';
-            jobManager.updateJobStatus(localId, 'failed', 0);
-            updateJobElement(job);
-        }
-    }
+    initApp();
 });
